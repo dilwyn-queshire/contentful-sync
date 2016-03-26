@@ -57,7 +57,7 @@ function contentfulSync(options, cb) {
     var syncPromise = client.sync({
         initial: !previousSyncData,
         nextSyncToken: previousSyncData ? previousSyncData.nextSyncToken : null,
-        resolveLinks: true
+        resolveLinks: false
     });
 
     Promise.all([spacePromise, contentTypesPromise, syncPromise])
@@ -69,10 +69,35 @@ function contentfulSync(options, cb) {
             if(!previousSyncData) {
                 previousSyncData = {
                     nextSyncToken: null,
-                    entries: {}
+                    entryFiles: {},
+                    entries: {},
+                    assets: {}
                 };
             }
             previousSyncData.nextSyncToken = syncData.nextSyncToken;
+
+            function saveEntryToSyncData(entry) {
+                var contentType = getContentType(entry);
+                var data = getEntryData(entry, true);
+                var entryFileName = getContentTypeEntryFileName(contentType, data);
+
+                previousSyncData.entryFiles[entry.sys.id] = entryFileName;
+
+                previousSyncData.entries[entry.sys.id] = entry;
+            }
+
+            function deleteEntryFromSyncData(deletedEntry) {
+                delete previousSyncData.entryFiles[deletedEntry.sys.id];
+                delete previousSyncData.entries[deletedEntry.sys.id];
+            }
+
+            function saveAssetToSyncData(asset) {
+                previousSyncData.assets[asset.sys.id] = asset;
+            }
+
+            function deleteAssetFromSyncData(deletedAsset) {
+                delete previousSyncData.assets[deletedAsset.sys.id]
+            }
 
             function getContentType(entry) {
                 var result = contentTypes.items.filter(function (contentType) {
@@ -113,9 +138,41 @@ function contentfulSync(options, cb) {
                         return mapLinkedAsset(obj);
                     case 'Entry':
                         return mapLinkedEntry(obj);
+                    case 'Link':
+                        return mapLinkedLink(obj);
                 }
 
                 throw 'can not map obj "' + JSON.stringify(obj) + '"';
+            }
+
+            function mapLinkedLink(obj) {
+                switch (obj.sys.linkType) {
+                    case 'Entry':
+                        var previousEntries = Object.keys(previousSyncData.entries).map(function(key, index) {
+                            return previousSyncData.entries[key];
+                        });
+
+                        var entry = syncData.entries.concat(previousEntries).filter(function(entry) {
+                            return entry.sys.id === obj.sys.id;
+                        })[0];
+
+                        if(!entry) throw 'linked entry id=' + obj.sys.id + ' not found';
+                        return mapLinkedEntry(entry);
+
+                    case 'Asset':
+                        var previousAssets = Object.keys(previousSyncData.assets).map(function(key, index) {
+                            return previousSyncData.assets[key];
+                        });
+
+                        var asset = syncData.assets.concat(previousAssets).filter(function(asset) {
+                            return asset.sys.id === obj.sys.id;
+                        })[0];
+
+                        if(!asset) throw 'linked asset id=' + obj.sys.id + ' not found';
+                        return mapLinkedAsset(asset);
+                }
+
+                throw 'can not map link "' + JSON.stringify(obj) + '"';
             }
 
             function mapLinkedEntry(entry) {
@@ -207,16 +264,24 @@ function contentfulSync(options, cb) {
                 var yamlMatterStr = matter.stringify(yamlMatterContents, data);
                 fs.writeFileSync(entryFileName, yamlMatterStr);
 
-                previousSyncData.entries[entry.sys.id] = entryFileName;
+                saveEntryToSyncData(entry);
             });
 
             (syncData.deletedEntries || []).forEach(function (deletedEntry) {
                 if (!previousSyncData) throw 'previousSyncData is null';
 
-                var entrylFileName = previousSyncData.entries[deletedEntry.sys.id];
+                var entrylFileName = previousSyncData.entryFiles[deletedEntry.sys.id];
                 fs.unlinkSync(entrylFileName);
 
-                delete previousSyncData.entries[deletedEntry.sys.id];
+                deleteEntryFromSyncData(deletedEntry);
+            });
+
+            (syncData.assets || []).forEach(function(asset) {
+                saveAssetToSyncData(asset);
+            });
+
+            (syncData.deletedAssets || []).forEach(function(deletedAsset) {
+                deleteAssetFromSyncData(deletedAsset);
             });
 
             return previousSyncData;
@@ -236,7 +301,7 @@ if (!module.parent) {
     var options = JSON.parse(optionsStr);
     contentfulSync(options, function (err) {
         if(err) {
-            throw err;
+            console.error(err);
         } else {
             console.log('Import finished');
         }
